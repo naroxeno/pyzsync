@@ -6,8 +6,10 @@
 use chrono::prelude::*;
 use log::{debug, info, warn};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
-use pyo3::prelude::*;
 use pyo3::pyclass::CompareOp;
+use pyo3::types::PyModule;
+use pyo3::Bound;
+use pyo3::{prelude::*, IntoPyObjectExt};
 use pyo3::{types::PyBytes, wrap_pyfunction};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
@@ -15,7 +17,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs::{remove_file, File, OpenOptions};
 use std::io::{prelude::*, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::Instant; // Import Bound
 
 mod md4;
 
@@ -257,20 +259,25 @@ impl PatchInstruction {
 		)
 	}
 
-	fn __richcmp__(&self, other: PyRef<PatchInstruction>, op: CompareOp) -> Py<PyAny> {
-		let py = other.py();
+	fn __richcmp__(
+		&self,
+		other: PyRef<PatchInstruction>,
+		op: CompareOp,
+		py: Python<'_>,
+	) -> Py<PyAny> {
 		match op {
-			CompareOp::Eq => (self.source == other.source
-				&& self.source_offset == other.source_offset
-				&& self.target_offset == other.target_offset
-				&& self.size == other.size)
-				.into_py(py),
-			CompareOp::Ne => (self.source != other.source
-				|| self.source_offset != other.source_offset
-				|| self.target_offset != other.target_offset
-				|| self.size != other.size)
-				.into_py(py),
-			_ => py.NotImplemented(),
+		CompareOp::Eq => (self.source == other.source
+                    && self.source_offset == other.source_offset
+                    && self.target_offset == other.target_offset
+                    && self.size == other.size)
+                    .into_py_any(py).expect("ERR"),
+    CompareOp::Ne => (self.source != other.source
+                    || self.source_offset != other.source_offset
+                    || self.target_offset != other.target_offset
+                    || self.size != other.size).into_py_any(py).expect("ERR"),
+                    // 转换为 Py<PyAny>
+			// 对于其他比较操作（如 Lt, Le, Gt, Ge），根据 Python 的约定，返回 NotImplemented
+      _ => py.NotImplemented().into_any(),
 		}
 	}
 
@@ -323,9 +330,17 @@ fn _md4(block: &[u8], num_bytes: u8) -> Result<[u8; CHECKSUM_SIZE], PyErr> {
 }
 
 #[pyfunction]
-fn rs_md4(block: &PyBytes, num_bytes: u8, py: Python<'_>) -> PyResult<PyObject> {
-	let res = _md4(block.as_bytes().to_vec().as_ref(), num_bytes)?;
-	Ok(PyBytes::new(py, &res).into())
+fn rs_md4<'py>(block: &Bound<'py, PyBytes>, num_bytes: u8) -> PyResult<PyObject> {
+	// 调用 _md4，由于它返回 PyResult，我们可以使用 ? 运算符来传播错误
+	let res_array: [u8; CHECKSUM_SIZE] = _md4(block.as_bytes(), num_bytes)?;
+
+	let py = block.py(); // 获取 Python 解释器上下文
+
+	// 将 Rust 的 [u8; CHECKSUM_SIZE] 数组转换为 Python 的 bytes 对象
+	let py_bytes = PyBytes::new(py, &res_array);
+
+	// 将 Bound<PyBytes> 转换为 PyObject 并返回
+	Ok(py_bytes.into_any().into())
 }
 
 /// Get the rsum of a block
@@ -358,7 +373,7 @@ fn _rsum(block: &[u8], num_bytes: u8) -> Result<u32, PyErr> {
 }
 
 #[pyfunction]
-fn rs_rsum(block: &PyBytes, num_bytes: u8) -> PyResult<u32> {
+fn rs_rsum<'py>(block: &Bound<'py, PyBytes>, num_bytes: u8) -> PyResult<u32> {
 	let res = _rsum(block.as_bytes().to_vec().as_ref(), num_bytes)?;
 	Ok(res)
 }
@@ -475,7 +490,7 @@ fn _calc_block_infos(
 			let abort: PyObject = progress_callback
 				.call(py, (block_id + 1, block_count), None)?
 				.extract(py)?;
-			if abort.is_true(py)? {
+			if abort.is_truthy(py)? {
 				return Err(PyRuntimeError::new_err("Aborted by progress callback"));
 			}
 		}
@@ -615,7 +630,7 @@ fn rs_get_patch_instructions(
 					let abort: PyObject = progress_callback
 						.call(py, (pos, end_pos), None)?
 						.extract(py)?;
-					if abort.is_true(py)? {
+					if abort.is_truthy(py)? {
 						return Err(PyRuntimeError::new_err("Aborted by progress callback"));
 					}
 				}
@@ -1103,7 +1118,7 @@ fn rs_read_zsync_file(zsync_file_path: PathBuf) -> PyResult<ZsyncFileInfo> {
 
 /// A Python module implemented in Rust.
 #[pymodule]
-fn pyzsync(_py: Python, m: &PyModule) -> PyResult<()> {
+fn pyzsync(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
 	pyo3_log::init();
 
 	m.add_class::<BlockInfo>()?;
